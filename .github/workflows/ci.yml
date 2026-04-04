@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gofmt:
+    name: Go Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@4a36011aa5ab2b3c4b0e3d63316d1d9e5ebfddc7 # v6.4.0
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(find cmd internal -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
+
+  gotest:
+    name: Go Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@4a36011aa5ab2b3c4b0e3d63316d1d9e5ebfddc7 # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go test ./...
+
+  gobuild:
+    name: Go Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@4a36011aa5ab2b3c4b0e3d63316d1d9e5ebfddc7 # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go build -o knotical ./cmd/knotical
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: knotical-go-${{ matrix.os }}
+          path: knotical
