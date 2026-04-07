@@ -31,13 +31,15 @@ func splitCommand(command string) ([]string, error) {
 	inSingle := false
 	inDouble := false
 	escaped := false
+	tokenStarted := false
 
 	flush := func() {
-		if current.Len() == 0 {
+		if !tokenStarted && current.Len() == 0 {
 			return
 		}
 		tokens = append(tokens, current.String())
 		current.Reset()
+		tokenStarted = false
 	}
 
 	for _, r := range command {
@@ -45,16 +47,21 @@ func splitCommand(command string) ([]string, error) {
 		case escaped:
 			current.WriteRune(r)
 			escaped = false
+			tokenStarted = true
 		case r == '\\' && !inSingle:
 			escaped = true
+			tokenStarted = true
 		case r == '\'' && !inDouble:
 			inSingle = !inSingle
+			tokenStarted = true
 		case r == '"' && !inSingle:
 			inDouble = !inDouble
+			tokenStarted = true
 		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
 			flush()
 		default:
 			current.WriteRune(r)
+			tokenStarted = true
 		}
 	}
 	if escaped || inSingle || inDouble {

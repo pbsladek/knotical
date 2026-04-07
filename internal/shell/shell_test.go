@@ -127,6 +127,44 @@ func TestParseSimpleCommandSupportsQuotedArgs(t *testing.T) {
 	}
 }
 
+func TestParseSimpleCommandPreservesQuotedEmptyArgs(t *testing.T) {
+	name, args, err := ParseSimpleCommand(`printf "" "x"`)
+	if err != nil {
+		t.Fatalf("ParseSimpleCommand failed: %v", err)
+	}
+	if name != "printf" {
+		t.Fatalf("unexpected command name: %q", name)
+	}
+	if len(args) != 2 || args[0] != "" || args[1] != "x" {
+		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
+func TestParseSimpleCommandSupportsEscapedWhitespace(t *testing.T) {
+	name, args, err := ParseSimpleCommand(`echo hello\ world`)
+	if err != nil {
+		t.Fatalf("ParseSimpleCommand failed: %v", err)
+	}
+	if name != "echo" {
+		t.Fatalf("unexpected command name: %q", name)
+	}
+	if len(args) != 1 || args[0] != "hello world" {
+		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
+func TestParseSimpleCommandRejectsUnterminatedQuotes(t *testing.T) {
+	if _, _, err := ParseSimpleCommand(`echo "hello`); err == nil {
+		t.Fatal("expected unterminated quote failure")
+	}
+}
+
+func TestParseSimpleCommandRejectsTrailingEscape(t *testing.T) {
+	if _, _, err := ParseSimpleCommand(`echo hello\`); err == nil {
+		t.Fatal("expected trailing escape failure")
+	}
+}
+
 func TestParseSimpleCommandRejectsShellOperators(t *testing.T) {
 	if _, _, err := ParseSimpleCommand("echo hi | cat"); err == nil {
 		t.Fatal("expected shell operator rejection")
