@@ -150,6 +150,14 @@ func (e *fakeShellExecutor) Execute(req shell.ExecutionRequest) error {
 	return nil
 }
 
+func serviceReq(configure func(*Request)) Request {
+	var req Request
+	if configure != nil {
+		configure(&req)
+	}
+	return req
+}
+
 func TestRunPromptUsesAppSeams(t *testing.T) {
 	prov := &fakeProvider{
 		response: model.CompletionResponse{
@@ -198,16 +206,16 @@ func TestRunPromptUsesAppSeams(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText:  "hello",
-		Fragments:   []string{"ctx"},
-		Role:        "reviewer",
-		Chat:        "demo",
-		TopP:        1,
-		Cache:       true,
-		Interaction: true,
-		Save:        "saved",
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "hello"
+		req.Fragments = []string{"ctx"}
+		req.Role = "reviewer"
+		req.Chat = "demo"
+		req.TopP = 1
+		req.Cache = true
+		req.Interaction = true
+		req.Save = "saved"
+	}))
 	if err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
@@ -276,16 +284,474 @@ func TestRunPromptUsesCacheWithoutProviderCall(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText: "hello",
-		TopP:       1,
-		Cache:      true,
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "hello"
+		req.TopP = 1
+		req.Cache = true
+	}))
 	if err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
 	if len(prov.requests) != 0 {
 		t.Fatalf("expected cache hit to skip provider, got %d requests", len(prov.requests))
+	}
+}
+
+func TestRunPromptAppliesConfiguredInputReduction(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			cfg.MaxInputLines = 2
+			cfg.DefaultTailLines = 3
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "analyze"
+		req.StdinText = "l1\nl2\nl3\nl4"
+		req.TopP = 1
+	}))
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	if len(prov.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(prov.requests))
+	}
+	got := prov.requests[0].Messages[len(prov.requests[0].Messages)-1].Content
+	want := "analyze\n\ninput:\nl2\nl3"
+	if got != want {
+		t.Fatalf("unexpected reduced prompt:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestRunPromptFailsOnConfiguredTokenBudget(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			cfg.MaxInputTokens = 2
+			cfg.InputReductionMode = "fail"
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "analyze"
+		req.StdinText = "abcdefghijklmno"
+		req.TopP = 1
+	}))
+	if err == nil || err.Error() != "input exceeds max token budget: estimated 4 > 2" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(prov.requests) != 0 {
+		t.Fatalf("expected no provider request on budget failure, got %d", len(prov.requests))
+	}
+}
+
+func TestRunPromptAnalyzeLogsAppliesSchemaAndLogLabel(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: `{"summary":"ok","likely_root_cause":"db","next_steps":"restart"}`}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			cfg.LogAnalysisSchema = "summary, likely_root_cause, next_steps"
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "find the root cause"
+		req.StdinText = "error line one\nerror line two"
+		req.AnalyzeLogs = true
+		req.TopP = 1
+		req.Interaction = true
+	}))
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	if len(prov.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(prov.requests))
+	}
+	req := prov.requests[0]
+	if !strings.Contains(req.System, "operational logs") {
+		t.Fatalf("expected log analysis system prompt, got %q", req.System)
+	}
+	if req.Schema == nil {
+		t.Fatalf("expected configured log analysis schema")
+	}
+	if got := req.Messages[len(req.Messages)-1].Content; got != "find the root cause\n\nlogs:\nerror line one\nerror line two" {
+		t.Fatalf("unexpected log analysis prompt body: %q", got)
+	}
+}
+
+func TestRunPromptAnalyzeLogsAppliesConfiguredDefaultProfileEndToEnd(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			cfg.DefaultLogProfile = "k8s"
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "find the root cause"
+		req.StdinText = "2026-04-04T10:00:00Z pod/api-1234567890-abcde error\n2026-04-04T10:01:00Z pod/api-abcdef1234-fghij error\n"
+		req.AnalyzeLogs = true
+		req.TopP = 1
+		req.Interaction = true
+	}))
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	if len(prov.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(prov.requests))
+	}
+	got := prov.requests[0].Messages[len(prov.requests[0].Messages)-1].Content
+	want := "find the root cause\n\nlogs:\n[x2] pod/api-<pod> error"
+	if got != want {
+		t.Fatalf("expected configured default profile to shape prompt:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestRunPromptRejectsConflictingPipelineShorthandsBeforeProviderCall(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "find the root cause"
+		req.StdinText = "error line one\nerror line two"
+		req.AnalyzeLogs = true
+		req.Dedupe = true
+		req.Unique = true
+		req.TopP = 1
+		req.Interaction = true
+	}))
+	if err == nil || !strings.Contains(err.Error(), "cannot be used together") {
+		t.Fatalf("expected pipeline conflict error, got %v", err)
+	}
+	if len(prov.requests) != 0 {
+		t.Fatalf("expected no provider request on pipeline conflict, got %d", len(prov.requests))
+	}
+}
+
+func TestRunPromptRejectsInvalidRegexTransformBeforeProviderCall(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "find the root cause"
+		req.StdinText = "error line one\nerror line two"
+		req.AnalyzeLogs = true
+		req.Transforms = []string{"include-regex:("}
+		req.TopP = 1
+		req.Interaction = true
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid regex") {
+		t.Fatalf("expected invalid regex error, got %v", err)
+	}
+	if len(prov.requests) != 0 {
+		t.Fatalf("expected no provider request on invalid regex, got %d", len(prov.requests))
+	}
+}
+
+func TestRunPromptRejectsUnknownProfileBeforeProviderCall(t *testing.T) {
+	prov := &fakeProvider{response: model.CompletionResponse{Content: "ok"}}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = false
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return &fakeLogs{}
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "find the root cause"
+		req.StdinText = "error line one\nerror line two"
+		req.AnalyzeLogs = true
+		req.Profile = "mystery"
+		req.TopP = 1
+		req.Interaction = true
+	}))
+	if err == nil || !strings.Contains(err.Error(), `unknown log profile "mystery"`) {
+		t.Fatalf("expected unknown profile error, got %v", err)
+	}
+	if len(prov.requests) != 0 {
+		t.Fatalf("expected no provider request on unknown profile, got %d", len(prov.requests))
+	}
+}
+
+func TestRunPromptSummarizesOversizedInputAndLogsReduction(t *testing.T) {
+	prov := &fakeProvider{responses: []model.CompletionResponse{
+		{Content: "chunk a"},
+		{Content: "chunk b"},
+		{Content: "merged"},
+		{Content: "final answer"},
+	}}
+	logs := &fakeLogs{}
+
+	svc := New(Dependencies{
+		LoadConfig: func() (config.Config, error) {
+			cfg := config.Default()
+			cfg.DefaultModel = "gpt-4o-mini"
+			cfg.DefaultProvider = "openai"
+			cfg.Stream = false
+			cfg.LogToDB = true
+			cfg.SummarizeChunkOverlapLines = 0
+			return cfg, nil
+		},
+		ResolveAPIKey: func(string) (string, error) { return "key", nil },
+		BuildProvider: func(string, string, string, time.Duration) (provider.Provider, error) { return prov, nil },
+		ChatStore:     &fakeChatStore{},
+		FragmentStore: fakeFragmentStore{fragments: map[string]store.Fragment{}},
+		RoleStore:     fakeRoleStore{},
+		TemplateStore: &fakeTemplateStore{templates: map[string]store.Template{}},
+		AliasStore:    fakeAliasStore{aliases: map[string]string{}},
+		CacheStore:    &fakeCacheStore{},
+		NewLogStore: func() Logs {
+			return logs
+		},
+		Printer:       output.NewPrinter(&strings.Builder{}),
+		PromptAction:  func(shell.PromptOptions) (shell.Action, error) { return shell.ActionAbort, nil },
+		ConfirmShell:  func(shell.ExecutionMode, shell.RiskReport) (bool, error) { return true, nil },
+		ExecuteShell:  func(shell.ExecutionRequest) error { return nil },
+		ReadLastChat:  func() (string, error) { return "", nil },
+		WriteLastChat: func(string) error { return nil },
+		Now:           func() time.Time { return time.Now().UTC() },
+		Stdin:         strings.NewReader(""),
+	})
+
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "analyze these logs"
+		req.StdinText = "abcdefghijklmnopqrst\nuvwxyzabcdefghijklmn"
+		req.StdinMode = "append"
+		req.MaxInputTokens = 4
+		req.InputReduction = "summarize"
+		req.SummarizeChunkTokens = 8
+		req.TopP = 1
+	}))
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	if len(prov.requests) != 4 {
+		t.Fatalf("expected four provider requests, got %d", len(prov.requests))
+	}
+	if got := prov.requests[3].Messages[len(prov.requests[3].Messages)-1].Content; got != "analyze these logs\n\ninput:\nmerged" {
+		t.Fatalf("unexpected final prompt after summarization: %q", got)
+	}
+	if len(logs.entries) != 1 || logs.entries[0].ReductionJSON == nil {
+		t.Fatalf("expected reduction metadata to be logged, got %+v", logs.entries)
+	}
+	if !strings.Contains(*logs.entries[0].ReductionJSON, `"summarized":true`) {
+		t.Fatalf("expected summarized reduction metadata, got %s", *logs.entries[0].ReductionJSON)
+	}
+}
+
+func TestSplitSummaryChunksUsesOverlap(t *testing.T) {
+	text := strings.Join([]string{
+		"aaaaaaa1",
+		"bbbbbbb2",
+		"ccccccc3",
+	}, "\n")
+
+	chunks := splitSummaryChunks(text, 8, 1)
+	if len(chunks) != 2 {
+		t.Fatalf("expected two chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if !strings.Contains(chunks[1], "bbbbbbb2") || !strings.Contains(chunks[1], "ccccccc3") {
+		t.Fatalf("expected overlap between chunk 1 and 2, got %+v", chunks)
+	}
+}
+
+func TestComposeSummarizedPromptPreservesInstruction(t *testing.T) {
+	got := composeSummarizedPrompt(serviceReq(func(req *Request) {
+		req.PromptText = "analyze"
+		req.StdinMode = "append"
+	}), &model.ReductionMetadata{StdinLabel: "logs"}, "summary")
+	if got != "analyze\n\nlogs:\nsummary" {
+		t.Fatalf("unexpected composed summarized prompt: %q", got)
 	}
 }
 
@@ -328,11 +794,11 @@ func TestRunPromptUsesPersistedSessionSystemPrompt(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	if err := svc.RunPrompt(context.Background(), Request{
-		PromptText: "hello",
-		Chat:       "demo",
-		TopP:       1,
-	}); err != nil {
+	if err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "hello"
+		req.Chat = "demo"
+		req.TopP = 1
+	})); err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
 
@@ -360,14 +826,21 @@ func TestRunReplTurnPersistsSession(t *testing.T) {
 	})
 
 	runCtx := replRunContext{
-		cfg:          config.Config{Stream: false, LogToDB: true},
+		cfg: config.Config{
+			CoreConfig: config.CoreConfig{
+				Stream:  false,
+				LogToDB: true,
+			},
+		},
 		modelID:      "gpt-4o-mini",
 		systemPrompt: "be terse",
 		providerName: "openai",
 		prov:         prov,
 		session:      model.NewChatSession("demo"),
 	}
-	if err := svc.runReplTurn(context.Background(), &runCtx, Request{Repl: "demo"}, "hello"); err != nil {
+	if err := svc.runReplTurn(context.Background(), &runCtx, serviceReq(func(req *Request) {
+		req.Repl = "demo"
+	}), "hello"); err != nil {
 		t.Fatalf("runReplTurn failed: %v", err)
 	}
 	if lastChat != "demo" {
@@ -394,11 +867,11 @@ func TestResolveModelAndSystemPrefersRoleOverTemplatePrompt(t *testing.T) {
 	})
 
 	cfg := config.Default()
-	modelID, systemPrompt, temperature, renderMarkdown, err := svc.resolveModelAndSystem(Request{
-		Role:        "reviewer",
-		Template:    "tmpl",
-		Temperature: 0,
-	}, cfg)
+	modelID, systemPrompt, temperature, renderMarkdown, err := svc.resolveModelAndSystem(serviceReq(func(req *Request) {
+		req.Role = "reviewer"
+		req.Template = "tmpl"
+		req.Temperature = 0
+	}), cfg)
 	if err != nil {
 		t.Fatalf("resolveModelAndSystem failed: %v", err)
 	}
@@ -418,10 +891,10 @@ func TestResolveModelAndSystemPrefersRoleOverTemplatePrompt(t *testing.T) {
 
 func TestApplySchemaFallbackInstructionOnlyForNonNativeProviders(t *testing.T) {
 	schemaValue := map[string]any{"type": "object"}
-	if got := applySchemaFallbackInstruction("base", schemaValue, "openai"); got != "base" {
+	if got := applySchemaFallbackInstruction("base", schemaValue, config.ProviderCapabilities{NativeSchema: true}); got != "base" {
 		t.Fatalf("expected native provider to keep prompt unchanged, got %q", got)
 	}
-	got := applySchemaFallbackInstruction("base", schemaValue, "anthropic")
+	got := applySchemaFallbackInstruction("base", schemaValue, config.ProviderCapabilities{})
 	if !strings.Contains(got, "Respond with valid JSON matching this schema") {
 		t.Fatalf("expected fallback schema instruction, got %q", got)
 	}
@@ -494,17 +967,17 @@ func TestRunPromptShellAutoExecutesSandbox(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText:     "show shell",
-		Shell:          true,
-		ExecuteMode:    shell.ExecutionModeSandbox,
-		SandboxRuntime: "podman",
-		SandboxImage:   "alpine:3.20",
-		SandboxNetwork: true,
-		SandboxWrite:   true,
-		Interaction:    false,
-		TopP:           1,
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "show shell"
+		req.Shell = true
+		req.ExecuteMode = shell.ExecutionModeSandbox
+		req.SandboxRuntime = "podman"
+		req.SandboxImage = "alpine:3.20"
+		req.SandboxNetwork = true
+		req.SandboxWrite = true
+		req.Interaction = false
+		req.TopP = 1
+	}))
 	if err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
@@ -548,13 +1021,13 @@ func TestRunPromptBlocksRiskyHostAutoExecutionWithoutForce(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText:  "danger",
-		Shell:       true,
-		ExecuteMode: shell.ExecutionModeHost,
-		Interaction: false,
-		TopP:        1,
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "danger"
+		req.Shell = true
+		req.ExecuteMode = shell.ExecutionModeHost
+		req.Interaction = false
+		req.TopP = 1
+	}))
 	if err == nil || !strings.Contains(err.Error(), "refusing high-risk host shell execution") {
 		t.Fatalf("expected risky host execution refusal, got %v", err)
 	}
@@ -591,13 +1064,13 @@ func TestRunPromptBlocksRiskySafeExecution(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText:  "danger",
-		Shell:       true,
-		ExecuteMode: shell.ExecutionModeSafe,
-		Interaction: false,
-		TopP:        1,
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "danger"
+		req.Shell = true
+		req.ExecuteMode = shell.ExecutionModeSafe
+		req.Interaction = false
+		req.TopP = 1
+	}))
 	if err == nil || !strings.Contains(err.Error(), "safe shell execution refuses high-risk commands") {
 		t.Fatalf("expected risky safe execution refusal, got %v", err)
 	}
@@ -643,13 +1116,13 @@ func TestRunPromptInteractiveSandboxRegeneratesSandboxCommand(t *testing.T) {
 		Stdin:         strings.NewReader(""),
 	})
 
-	err := svc.RunPrompt(context.Background(), Request{
-		PromptText:     "show readme",
-		Shell:          true,
-		Interaction:    true,
-		SandboxRuntime: "docker",
-		TopP:           1,
-	})
+	err := svc.RunPrompt(context.Background(), serviceReq(func(req *Request) {
+		req.PromptText = "show readme"
+		req.Shell = true
+		req.Interaction = true
+		req.SandboxRuntime = "docker"
+		req.TopP = 1
+	}))
 	if err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}

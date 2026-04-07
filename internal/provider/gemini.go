@@ -119,9 +119,22 @@ func toGeminiContents(messages []model.Message) []*genai.Content {
 
 func toGeminiConfig(req Request) *genai.GenerateContentConfig {
 	config := &genai.GenerateContentConfig{}
+	applyGeminiSystemConfig(config, req)
+	applyGeminiSamplingConfig(config, req)
+	applyGeminiSchemaConfig(config, req)
+	if isEmptyGeminiConfig(config) {
+		return nil
+	}
+	return config
+}
+
+func applyGeminiSystemConfig(config *genai.GenerateContentConfig, req Request) {
 	if req.System != "" {
 		config.SystemInstruction = genai.NewContentFromText(req.System, "system")
 	}
+}
+
+func applyGeminiSamplingConfig(config *genai.GenerateContentConfig, req Request) {
 	if req.Temperature != nil {
 		value := float32(*req.Temperature)
 		config.Temperature = &value
@@ -133,19 +146,22 @@ func toGeminiConfig(req Request) *genai.GenerateContentConfig {
 	if req.MaxTokens > 0 {
 		config.MaxOutputTokens = int32(req.MaxTokens)
 	}
+}
+
+func applyGeminiSchemaConfig(config *genai.GenerateContentConfig, req Request) {
 	if req.Schema != nil {
 		config.ResponseMIMEType = "application/json"
 		config.ResponseJsonSchema = req.Schema
 	}
-	if config.SystemInstruction == nil &&
+}
+
+func isEmptyGeminiConfig(config *genai.GenerateContentConfig) bool {
+	return config.SystemInstruction == nil &&
 		config.Temperature == nil &&
 		config.TopP == nil &&
 		config.MaxOutputTokens == 0 &&
 		config.ResponseMIMEType == "" &&
-		config.ResponseJsonSchema == nil {
-		return nil
-	}
-	return config
+		config.ResponseJsonSchema == nil
 }
 
 func textFromGenAI(resp *genai.GenerateContentResponse) string {

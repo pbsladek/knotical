@@ -77,6 +77,33 @@ func TestPromptActionParsesHostExecution(t *testing.T) {
 	}
 }
 
+func TestConfirmRiskyExecutionRejectsByDefault(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe failed: %v", err)
+	}
+	defer reader.Close()
+	if _, err := writer.WriteString("\n"); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	_ = writer.Close()
+
+	oldStdin := os.Stdin
+	os.Stdin = reader
+	defer func() { os.Stdin = oldStdin }()
+
+	ok, err := ConfirmRiskyExecution(ExecutionModeHost, RiskReport{
+		HighRisk: true,
+		Reasons:  []string{"uses sudo"},
+	})
+	if err != nil {
+		t.Fatalf("ConfirmRiskyExecution failed: %v", err)
+	}
+	if ok {
+		t.Fatal("expected default confirmation to reject execution")
+	}
+}
+
 func TestAnalyzeCommandFlagsHighRiskPatterns(t *testing.T) {
 	report := AnalyzeCommand("sudo rm -rf /tmp/data && echo done")
 	if !report.HighRisk {
@@ -109,6 +136,12 @@ func TestParseSimpleCommandRejectsShellOperators(t *testing.T) {
 func TestParseSimpleCommandRejectsNonAllowlistedExecutables(t *testing.T) {
 	if _, _, err := ParseSimpleCommand(`python -c "print(1)"`); err == nil {
 		t.Fatal("expected non-allowlisted executable to fail")
+	}
+}
+
+func TestParseSimpleCommandRejectsPathQualifiedCommands(t *testing.T) {
+	if _, _, err := ParseSimpleCommand("/bin/echo hello"); err == nil {
+		t.Fatal("expected path-qualified command to fail")
 	}
 }
 
@@ -146,5 +179,11 @@ func TestSandboxCommandArgsUseSafeDefaults(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected sandbox args to contain %q, got %q", want, got)
 		}
+	}
+}
+
+func TestResolveSandboxRuntimeKeepsExplicitRuntime(t *testing.T) {
+	if got := ResolveSandboxRuntime("podman"); got != "podman" {
+		t.Fatalf("expected explicit runtime to be preserved, got %q", got)
 	}
 }

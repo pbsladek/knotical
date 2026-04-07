@@ -245,6 +245,7 @@ func TestLogStoreRoundTrip(t *testing.T) {
 	systemPrompt := "Be terse."
 	schemaJSON := `{"type":"object"}`
 	fragmentsJSON := `["ctx","readme"]`
+	reductionJSON := `{"mode":"summarize","summarized":true}`
 	inputTokens := int64(3)
 	outputTokens := int64(7)
 	durationMS := int64(42)
@@ -257,6 +258,7 @@ func TestLogStoreRoundTrip(t *testing.T) {
 		SystemPrompt:  &systemPrompt,
 		SchemaJSON:    &schemaJSON,
 		FragmentsJSON: &fragmentsJSON,
+		ReductionJSON: &reductionJSON,
 		InputTokens:   &inputTokens,
 		OutputTokens:  &outputTokens,
 		DurationMS:    &durationMS,
@@ -285,8 +287,8 @@ func TestLogStoreRoundTrip(t *testing.T) {
 	if entries[0].Prompt != "hello" || entries[0].Response != "world" {
 		t.Fatalf("unexpected log entry: %+v", entries[0])
 	}
-	if entries[0].SchemaJSON == nil || *entries[0].SchemaJSON != schemaJSON || entries[0].FragmentsJSON == nil || *entries[0].FragmentsJSON != fragmentsJSON {
-		t.Fatalf("expected schema and fragments in log entry: %+v", entries[0])
+	if entries[0].SchemaJSON == nil || *entries[0].SchemaJSON != schemaJSON || entries[0].FragmentsJSON == nil || *entries[0].FragmentsJSON != fragmentsJSON || entries[0].ReductionJSON == nil || *entries[0].ReductionJSON != reductionJSON {
+		t.Fatalf("expected schema, fragments, and reduction in log entry: %+v", entries[0])
 	}
 
 	got, err := store.Get(entries[0].ID)
@@ -296,8 +298,8 @@ func TestLogStoreRoundTrip(t *testing.T) {
 	if got == nil || got.Model != "gpt-4o-mini" {
 		t.Fatalf("unexpected get result: %+v", got)
 	}
-	if got.SchemaJSON == nil || *got.SchemaJSON != schemaJSON || got.FragmentsJSON == nil || *got.FragmentsJSON != fragmentsJSON {
-		t.Fatalf("expected schema/fragments in get result: %+v", got)
+	if got.SchemaJSON == nil || *got.SchemaJSON != schemaJSON || got.FragmentsJSON == nil || *got.FragmentsJSON != fragmentsJSON || got.ReductionJSON == nil || *got.ReductionJSON != reductionJSON {
+		t.Fatalf("expected schema/fragments/reduction in get result: %+v", got)
 	}
 
 	if err := store.Clear(); err != nil {
@@ -309,6 +311,59 @@ func TestLogStoreRoundTrip(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected count=0 after clear, got %d", count)
+	}
+}
+
+func TestLogStoreMigratesReductionColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE logs (
+    id TEXT PRIMARY KEY,
+    conversation TEXT,
+    model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    system_prompt TEXT,
+    schema_json TEXT,
+    fragments_json TEXT,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE logs_fts USING fts4(id, prompt, response);`)
+	if err != nil {
+		t.Fatalf("schema setup failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	store := NewLogStore(path)
+	reductionJSON := `{"mode":"truncate"}`
+	if err := store.Insert(model.LogEntry{
+		ID:            "001",
+		Model:         "gpt-4o-mini",
+		Provider:      "openai",
+		Prompt:        "hello",
+		Response:      "world",
+		ReductionJSON: &reductionJSON,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("insert failed after migration: %v", err)
+	}
+
+	entry, err := store.Get("001")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if entry == nil || entry.ReductionJSON == nil || *entry.ReductionJSON != reductionJSON {
+		t.Fatalf("expected migrated reduction json, got %+v", entry)
 	}
 }
 

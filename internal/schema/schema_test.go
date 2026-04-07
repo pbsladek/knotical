@@ -1,6 +1,11 @@
 package schema
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestDSLToJSONSchema(t *testing.T) {
 	schema, err := DSLToJSONSchema("name, age:int, active:bool")
@@ -35,6 +40,68 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateUsesRealJSONSchemaFeatures(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+			"tags": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+			"meta": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"kind": map[string]any{
+						"type": "string",
+						"enum": []any{"incident", "deploy"},
+					},
+				},
+				"required": []any{"kind"},
+			},
+		},
+		"required": []any{"name", "tags", "meta"},
+	}
+
+	valid := map[string]any{
+		"name": "alice",
+		"tags": []any{"one", "two"},
+		"meta": map[string]any{"kind": "incident"},
+	}
+	if err := Validate(schema, valid); err != nil {
+		t.Fatalf("Validate rejected valid nested payload: %v", err)
+	}
+
+	invalid := map[string]any{
+		"name": "alice",
+		"tags": []any{"one", 2},
+		"meta": map[string]any{"kind": "unknown"},
+	}
+	err := Validate(schema, invalid)
+	if err == nil {
+		t.Fatal("Validate accepted invalid nested payload")
+	}
+	if !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("expected schema validation error, got %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidJSONSchemaFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "schema.json")
+	if err := os.WriteFile(path, []byte(`{"type":"object","properties":"bad"}`), 0o600); err != nil {
+		t.Fatalf("write schema file failed: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected invalid schema file to fail")
+	}
+	if !strings.Contains(err.Error(), "invalid JSON schema") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestPrettyValidateResponse(t *testing.T) {
 	schema, err := DSLToJSONSchema("name, age:int")
 	if err != nil {
@@ -47,5 +114,29 @@ func TestPrettyValidateResponse(t *testing.T) {
 	}
 	if pretty == "" || pretty[0] != '{' {
 		t.Fatalf("expected pretty JSON output")
+	}
+}
+
+func TestPrettyValidateResponseRejectsNestedSchemaViolations(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"meta": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{"type": "integer"},
+				},
+				"required": []any{"count"},
+			},
+		},
+		"required": []any{"meta"},
+	}
+
+	_, err := PrettyValidateResponse(schema, `{"meta":{"count":"two"}}`)
+	if err == nil {
+		t.Fatal("expected nested schema violation")
+	}
+	if !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

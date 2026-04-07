@@ -2,16 +2,26 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/pbsladek/knotical/internal/app"
 	"github.com/pbsladek/knotical/internal/config"
 	"github.com/pbsladek/knotical/internal/model"
 	"github.com/pbsladek/knotical/internal/store"
 )
+
+func rootReq(configure func(*app.Request)) app.Request {
+	var req app.Request
+	if configure != nil {
+		configure(&req)
+	}
+	return req
+}
 
 func TestRunPromptCacheHitStillPersistsChatAndLogs(t *testing.T) {
 	configHome := t.TempDir()
@@ -60,12 +70,14 @@ func TestRunPromptCacheHitStillPersistsChatAndLogs(t *testing.T) {
 	}
 
 	opts := rootOptions{
-		Prompt:   []string{"hello"},
-		Chat:     "demo",
-		System:   "be terse",
-		Cache:    true,
-		NoStream: true,
-		TopP:     1,
+		Request: rootReq(func(req *app.Request) {
+			req.Chat = "demo"
+			req.System = "be terse"
+			req.Cache = true
+			req.NoStream = true
+			req.TopP = 1
+		}),
+		Prompt: []string{"hello"},
 	}
 	if err := runPrompt(context.Background(), opts); err != nil {
 		t.Fatalf("runPrompt failed: %v", err)
@@ -126,12 +138,14 @@ func TestRunPromptChatPreservesSystemPromptForLogsAndSave(t *testing.T) {
 	}
 
 	opts := rootOptions{
-		Prompt:   []string{"hello"},
-		Chat:     "demo",
-		System:   "be terse",
-		Save:     "saved-template",
-		NoStream: true,
-		TopP:     1,
+		Request: rootReq(func(req *app.Request) {
+			req.Chat = "demo"
+			req.System = "be terse"
+			req.Save = "saved-template"
+			req.NoStream = true
+			req.TopP = 1
+		}),
+		Prompt: []string{"hello"},
 	}
 	if err := runPrompt(context.Background(), opts); err != nil {
 		t.Fatalf("runPrompt failed: %v", err)
@@ -193,10 +207,12 @@ func TestRunPromptStreamLogsTokenUsage(t *testing.T) {
 	}
 
 	opts := rootOptions{
+		Request: rootReq(func(req *app.Request) {
+			req.Cache = false
+			req.NoMD = true
+			req.TopP = 1
+		}),
 		Prompt: []string{"hello"},
-		Cache:  false,
-		NoMD:   true,
-		TopP:   1,
 	}
 	if err := runPrompt(context.Background(), opts); err != nil {
 		t.Fatalf("runPrompt failed: %v", err)
@@ -248,10 +264,12 @@ func TestRunPromptNoLogOverridesEnabledConfig(t *testing.T) {
 	}
 
 	if err := runPrompt(context.Background(), rootOptions{
-		Prompt:   []string{"hello"},
-		NoLog:    true,
-		NoStream: true,
-		TopP:     1,
+		Request: rootReq(func(req *app.Request) {
+			req.NoLog = true
+			req.NoStream = true
+			req.TopP = 1
+		}),
+		Prompt: []string{"hello"},
 	}); err != nil {
 		t.Fatalf("runPrompt failed: %v", err)
 	}
@@ -299,10 +317,12 @@ func TestRunPromptLogOverridesDisabledConfig(t *testing.T) {
 	}
 
 	if err := runPrompt(context.Background(), rootOptions{
-		Prompt:   []string{"hello"},
-		Log:      true,
-		NoStream: true,
-		TopP:     1,
+		Request: rootReq(func(req *app.Request) {
+			req.Log = true
+			req.NoStream = true
+			req.TopP = 1
+		}),
+		Prompt: []string{"hello"},
 	}); err != nil {
 		t.Fatalf("runPrompt failed: %v", err)
 	}
@@ -318,9 +338,140 @@ func TestRunPromptLogOverridesDisabledConfig(t *testing.T) {
 	}
 }
 
+func TestRunPromptCombinesPromptAndStdinInProviderRequest(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	withTestStdin(t, "error line\nstack trace\n")
+
+	recorder := &handlerFailureRecorder{}
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			recorder.Failf("decode request failed: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id":"resp_test",
+		  "object":"response",
+		  "created_at":1700000000,
+		  "status":"completed",
+		  "model":"gpt-4o-mini",
+		  "output":[{"id":"msg_123","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],
+		  "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.DefaultModel = "gpt-4o-mini"
+	cfg.DefaultProvider = "openai"
+	cfg.OpenAIBaseURL = server.URL + "/"
+	cfg.Stream = false
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("config save failed: %v", err)
+	}
+
+	if err := runPrompt(context.Background(), rootOptions{
+		Request: rootReq(func(req *app.Request) {
+			req.NoStream = true
+			req.TopP = 1
+		}),
+		Prompt: []string{"analyze", "these", "logs"},
+	}); err != nil {
+		t.Fatalf("runPrompt failed: %v", err)
+	}
+	recorder.Assert(t)
+
+	input, ok := requestBody["input"].([]any)
+	if !ok || len(input) == 0 {
+		t.Fatalf("unexpected request body: %+v", requestBody)
+	}
+	firstItem, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected first input item: %+v", input[0])
+	}
+	got, _ := firstItem["content"].(string)
+	want := "analyze these logs\n\ninput:\nerror line\nstack trace"
+	if got != want {
+		t.Fatalf("unexpected composed prompt:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
 func TestValidateRootOptionsRejectsConflictingLogFlags(t *testing.T) {
-	if err := validateRootOptions(rootOptions{Log: true, NoLog: true}); err == nil {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.Log = true
+		req.NoLog = true
+	})}); err == nil {
 		t.Fatal("expected conflicting logging flags to fail")
+	}
+}
+
+func TestValidateRootOptionsRejectsInvalidStdinMode(t *testing.T) {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.StdinMode = "weird" })}); err == nil {
+		t.Fatal("expected invalid stdin mode to fail")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.InputReduction = "mystery" })}); err == nil {
+		t.Fatal("expected invalid input reduction mode to fail")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.MaxInputLines = -1 })}); err == nil {
+		t.Fatal("expected negative input limit to fail")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.MaxInputTokens = -1 })}); err == nil {
+		t.Fatal("expected negative token limit to fail")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.AnalyzeLogs = true
+		req.Shell = true
+	})}); err == nil {
+		t.Fatal("expected analyze-logs conflict with shell mode")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.AnalyzeLogs = true
+		req.Code = true
+	})}); err == nil {
+		t.Fatal("expected analyze-logs conflict with code mode")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.AnalyzeLogs = true
+		req.DescribeShell = true
+	})}); err == nil {
+		t.Fatal("expected analyze-logs conflict with describe-shell mode")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.Profile = "k8s" })}); err == nil {
+		t.Fatal("expected profile without analyze-logs to fail")
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.AnalyzeLogs = true
+		req.Profile = "k8s"
+	})}); err != nil {
+		t.Fatalf("expected analyze-logs profile combination to pass, got %v", err)
+	}
+}
+
+func TestValidateRootOptionsRejectsNoPipelineWithExplicitPipelineFlags(t *testing.T) {
+	tests := []rootOptions{
+		{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true; req.Profile = "k8s" })},
+		{Request: rootReq(func(req *app.Request) {
+			req.AnalyzeLogs = true
+			req.NoPipeline = true
+			req.Transforms = []string{"include-regex:error"}
+		})},
+		{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true; req.Clean = true })},
+		{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true; req.Dedupe = true })},
+		{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true; req.Unique = true })},
+		{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true; req.K8s = true })},
+	}
+	for _, opts := range tests {
+		if err := validateRootOptions(opts); err == nil {
+			t.Fatalf("expected no-pipeline conflict for opts %+v", opts)
+		}
+	}
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.AnalyzeLogs = true; req.NoPipeline = true })}); err != nil {
+		t.Fatalf("expected bare --no-pipeline to pass, got %v", err)
 	}
 }
 
@@ -328,28 +479,48 @@ func TestValidateRootOptionsRejectsInvalidExecuteFlags(t *testing.T) {
 	if err := validateRootOptions(rootOptions{Execute: "sandbox"}); err == nil {
 		t.Fatal("expected --execute without --shell to fail")
 	}
-	if err := validateRootOptions(rootOptions{Shell: true, Execute: "weird"}); err == nil {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true }), Execute: "weird"}); err == nil {
 		t.Fatal("expected invalid execute mode to fail")
 	}
-	if err := validateRootOptions(rootOptions{Shell: true, ForceRisky: true, Execute: "safe"}); err == nil {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true; req.ForceRiskyShell = true }), Execute: "safe"}); err == nil {
 		t.Fatal("expected force-risky-shell without host execute to fail")
 	}
-	if err := validateRootOptions(rootOptions{Shell: true, SandboxRuntime: "runc"}); err == nil {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true; req.SandboxRuntime = "runc" })}); err == nil {
 		t.Fatal("expected invalid sandbox runtime to fail")
 	}
-	if err := validateRootOptions(rootOptions{Shell: true, Execute: "safe", SandboxRuntime: "docker"}); err == nil {
+	if err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true; req.SandboxRuntime = "docker" }), Execute: "safe"}); err == nil {
 		t.Fatal("expected sandbox options with non-sandbox execute mode to fail")
+	}
+}
+
+func TestValidateRootOptionsRejectsInvalidProvider(t *testing.T) {
+	err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.Provider = "weird"
+	})})
+	if err == nil {
+		t.Fatal("expected invalid provider to fail")
+	}
+}
+
+func TestValidateRootOptionsAllowsKnownProvider(t *testing.T) {
+	err := validateRootOptions(rootOptions{Request: rootReq(func(req *app.Request) {
+		req.Provider = "anthropic"
+	})})
+	if err != nil {
+		t.Fatalf("expected known provider to pass, got %v", err)
 	}
 }
 
 func TestNormalizeRootOptionsAppliesShellAliases(t *testing.T) {
 	opts := rootOptions{
-		Shell:          true,
-		SandboxExec:    true,
-		DockerRuntime:  true,
-		SandboxImage:   "alpine:3.20",
-		SandboxNetwork: true,
-		SandboxWrite:   true,
+		Request: rootReq(func(req *app.Request) {
+			req.Shell = true
+			req.SandboxImage = "alpine:3.20"
+			req.SandboxNetwork = true
+			req.SandboxWrite = true
+		}),
+		SandboxExec:   true,
+		DockerRuntime: true,
 	}
 	if err := normalizeRootOptions(&opts); err != nil {
 		t.Fatalf("normalizeRootOptions failed: %v", err)
@@ -357,8 +528,8 @@ func TestNormalizeRootOptionsAppliesShellAliases(t *testing.T) {
 	if opts.Execute != "sandbox" {
 		t.Fatalf("expected sandbox execute alias, got %q", opts.Execute)
 	}
-	if opts.SandboxRuntime != "docker" {
-		t.Fatalf("expected docker runtime alias, got %q", opts.SandboxRuntime)
+	if opts.Request.SandboxRuntime != "docker" {
+		t.Fatalf("expected docker runtime alias, got %q", opts.Request.SandboxRuntime)
 	}
 	if err := validateRootOptions(opts); err != nil {
 		t.Fatalf("validateRootOptions failed after normalization: %v", err)
@@ -366,19 +537,19 @@ func TestNormalizeRootOptionsAppliesShellAliases(t *testing.T) {
 }
 
 func TestNormalizeRootOptionsRejectsConflictingAliases(t *testing.T) {
-	opts := rootOptions{Shell: true, Execute: "host", SafeExec: true}
+	opts := rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true }), Execute: "host", SafeExec: true}
 	if err := normalizeRootOptions(&opts); err == nil {
 		t.Fatal("expected execute alias conflict")
 	}
 
-	opts = rootOptions{Shell: true, SandboxRuntime: "docker", PodmanRuntime: true}
+	opts = rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true; req.SandboxRuntime = "docker" }), PodmanRuntime: true}
 	if err := normalizeRootOptions(&opts); err == nil {
 		t.Fatal("expected runtime alias conflict")
 	}
 }
 
 func TestNormalizeRootOptionsAllowsSafeAliasWithoutSandboxOptions(t *testing.T) {
-	opts := rootOptions{Shell: true, SafeExec: true}
+	opts := rootOptions{Request: rootReq(func(req *app.Request) { req.Shell = true }), SafeExec: true}
 	if err := normalizeRootOptions(&opts); err != nil {
 		t.Fatalf("normalizeRootOptions failed: %v", err)
 	}
@@ -387,6 +558,106 @@ func TestNormalizeRootOptionsAllowsSafeAliasWithoutSandboxOptions(t *testing.T) 
 	}
 	if err := validateRootOptions(opts); err != nil {
 		t.Fatalf("validateRootOptions failed: %v", err)
+	}
+}
+
+func TestRootCommandExposesAnalyzeLogsAndProfileShorthands(t *testing.T) {
+	cmd := NewRootCommand()
+	analyze := cmd.Flags().Lookup("analyze-logs")
+	if analyze == nil || analyze.Shorthand != "a" {
+		t.Fatalf("expected -a shorthand for analyze-logs, got %+v", analyze)
+	}
+	profile := cmd.Flags().Lookup("profile")
+	if profile == nil || profile.Shorthand != "p" {
+		t.Fatalf("expected -p shorthand for profile, got %+v", profile)
+	}
+	if cmd.Flags().Lookup("transform") == nil {
+		t.Fatal("expected --transform flag")
+	}
+	if cmd.Flags().Lookup("clean") == nil || cmd.Flags().Lookup("dedupe") == nil || cmd.Flags().Lookup("unique") == nil || cmd.Flags().Lookup("k8s") == nil {
+		t.Fatal("expected log shorthand flags")
+	}
+	if tail := cmd.Flags().Lookup("tail"); tail == nil {
+		t.Fatal("expected --tail alias")
+	}
+}
+
+func TestRootCommandTailAliasAffectsPromptReduction(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	withTestStdin(t, "line 1\nline 2\nline 3\n")
+
+	recorder := &handlerFailureRecorder{}
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			recorder.Failf("decode request failed: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id":"resp_test",
+		  "object":"response",
+		  "created_at":1700000000,
+		  "status":"completed",
+		  "model":"gpt-4o-mini",
+		  "output":[{"id":"msg_123","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],
+		  "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.DefaultModel = "gpt-4o-mini"
+	cfg.DefaultProvider = "openai"
+	cfg.OpenAIBaseURL = server.URL + "/"
+	cfg.Stream = false
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("config save failed: %v", err)
+	}
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--tail", "2", "--no-stream", "analyze", "these", "logs"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("command execute failed: %v", err)
+	}
+	recorder.Assert(t)
+
+	input, ok := requestBody["input"].([]any)
+	if !ok || len(input) == 0 {
+		t.Fatalf("unexpected request body: %+v", requestBody)
+	}
+	firstItem, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected first input item: %+v", input[0])
+	}
+	got, _ := firstItem["content"].(string)
+	want := "analyze these logs\n\ninput:\nline 2\nline 3"
+	if got != want {
+		t.Fatalf("unexpected tail-reduced prompt:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestToAppRequestIncludesPipelineOptions(t *testing.T) {
+	req := toAppRequest(rootOptions{
+		Request: rootReq(func(req *app.Request) {
+			req.AnalyzeLogs = true
+			req.Profile = "k8s"
+			req.Transforms = []string{"include-regex:error"}
+			req.NoPipeline = true
+			req.Clean = true
+			req.Dedupe = true
+			req.K8s = true
+		}),
+	}, promptSource{instructionText: "analyze", stdinText: "logs"})
+	if req.Profile != "k8s" || !req.NoPipeline || !req.Clean || !req.Dedupe || !req.K8s {
+		t.Fatalf("unexpected pipeline request wiring: %+v", req)
+	}
+	if len(req.Transforms) != 1 || req.Transforms[0] != "include-regex:error" {
+		t.Fatalf("unexpected transforms: %+v", req.Transforms)
 	}
 }
 

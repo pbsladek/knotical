@@ -69,6 +69,32 @@ func TestExtractLogCodeBlockMissing(t *testing.T) {
 	}
 }
 
+func TestFormatReductionDetails(t *testing.T) {
+	raw := `{"profile":"k8s","transforms":["strip-timestamps","unique-count"],"shorthands":["clean","unique"],"mode":"summarize","stdin_label":"logs","original_tokens":2000,"final_tokens":300,"dropped_lines":1700,"unique_groups":35,"summarized":true,"summary_chunks":4,"intermediate_model":"gpt-4o-mini","steps":["tail:400","summarized:4"]}`
+	got := formatReductionDetails(&raw)
+	if !strings.Contains(got, "profile: k8s") {
+		t.Fatalf("expected profile in reduction details, got %q", got)
+	}
+	if !strings.Contains(got, "transforms: strip-timestamps, unique-count") {
+		t.Fatalf("expected transforms in reduction details, got %q", got)
+	}
+	if !strings.Contains(got, "shorthands: clean, unique") {
+		t.Fatalf("expected shorthands in reduction details, got %q", got)
+	}
+	if !strings.Contains(got, "mode: summarize") {
+		t.Fatalf("expected mode in reduction details, got %q", got)
+	}
+	if !strings.Contains(got, "dropped_lines: 1700") || !strings.Contains(got, "unique_groups: 35") {
+		t.Fatalf("expected dropped/unique stats in reduction details, got %q", got)
+	}
+	if !strings.Contains(got, "summarized: true (4 chunks)") {
+		t.Fatalf("expected summarize details, got %q", got)
+	}
+	if !strings.Contains(got, "intermediate_model: gpt-4o-mini") {
+		t.Fatalf("expected intermediate model in reduction details, got %q", got)
+	}
+}
+
 func TestBuildLogFilter(t *testing.T) {
 	filter, err := buildLogFilter(logsQueryOptions{
 		Count:              5,

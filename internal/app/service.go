@@ -15,38 +15,6 @@ import (
 	"github.com/pbsladek/knotical/internal/store"
 )
 
-type Request struct {
-	PromptText      string
-	Model           string
-	System          string
-	Fragments       []string
-	Shell           bool
-	DescribeShell   bool
-	Code            bool
-	NoMD            bool
-	Chat            string
-	Repl            string
-	Role            string
-	Template        string
-	Temperature     float64
-	Schema          string
-	TopP            float64
-	Cache           bool
-	Interaction     bool
-	ContinueLast    bool
-	NoStream        bool
-	Extract         bool
-	Save            string
-	Log             bool
-	NoLog           bool
-	ExecuteMode     shell.ExecutionMode
-	ForceRiskyShell bool
-	SandboxRuntime  string
-	SandboxImage    string
-	SandboxNetwork  bool
-	SandboxWrite    bool
-}
-
 type ChatSessionStore interface {
 	LoadOrCreate(name string) (model.ChatSession, error)
 	Save(session model.ChatSession) error
@@ -79,24 +47,25 @@ type Logs interface {
 }
 
 type Dependencies struct {
-	LoadConfig    func() (config.Config, error)
-	ResolveAPIKey func(providerName string) (string, error)
-	BuildProvider func(name string, apiKey string, apiBaseURL string, timeout time.Duration) (provider.Provider, error)
-	ChatStore     ChatSessionStore
-	FragmentStore FragmentLoader
-	RoleStore     RoleLoader
-	TemplateStore TemplateLoaderSaver
-	AliasStore    AliasLoader
-	CacheStore    Cache
-	NewLogStore   func() Logs
-	Printer       *output.Printer
-	PromptAction  func(options shell.PromptOptions) (shell.Action, error)
-	ConfirmShell  func(mode shell.ExecutionMode, report shell.RiskReport) (bool, error)
-	ExecuteShell  func(req shell.ExecutionRequest) error
-	ReadLastChat  func() (string, error)
-	WriteLastChat func(name string) error
-	Now           func() time.Time
-	Stdin         io.Reader
+	LoadConfig       func() (config.Config, error)
+	ResolveAPIKey    func(providerName string) (string, error)
+	BuildProvider    func(name string, apiKey string, apiBaseURL string, timeout time.Duration) (provider.Provider, error)
+	BuildCLIProvider func(name string, cfg provider.CLIConfig) (provider.Provider, error)
+	ChatStore        ChatSessionStore
+	FragmentStore    FragmentLoader
+	RoleStore        RoleLoader
+	TemplateStore    TemplateLoaderSaver
+	AliasStore       AliasLoader
+	CacheStore       Cache
+	NewLogStore      func() Logs
+	Printer          *output.Printer
+	PromptAction     func(options shell.PromptOptions) (shell.Action, error)
+	ConfirmShell     func(mode shell.ExecutionMode, report shell.RiskReport) (bool, error)
+	ExecuteShell     func(req shell.ExecutionRequest) error
+	ReadLastChat     func() (string, error)
+	WriteLastChat    func(name string) error
+	Now              func() time.Time
+	Stdin            io.Reader
 }
 
 type Service struct {
@@ -111,7 +80,9 @@ type promptRunContext struct {
 	renderMarkdown bool
 	schemaValue    map[string]any
 	providerName   string
+	providerCaps   config.ProviderCapabilities
 	prov           provider.Provider
+	reduction      *model.ReductionMetadata
 	chatName       string
 	session        model.ChatSession
 	messages       []model.Message
@@ -125,6 +96,7 @@ type replRunContext struct {
 	systemPrompt   string
 	renderMarkdown bool
 	providerName   string
+	providerCaps   config.ProviderCapabilities
 	prov           provider.Provider
 	session        model.ChatSession
 	tempPtr        *float64
@@ -144,15 +116,16 @@ func Default(printer *output.Printer, stdin io.Reader) *Service {
 	}
 	logStore := store.NewLogStore(config.LogsDBPath())
 	return New(Dependencies{
-		LoadConfig:    config.Load,
-		ResolveAPIKey: defaultResolveAPIKey,
-		BuildProvider: provider.Build,
-		ChatStore:     store.ChatStore{Dir: config.ChatCacheDir()},
-		FragmentStore: store.FragmentStore{Dir: config.FragmentsDir()},
-		RoleStore:     store.RoleStore{Dir: config.RolesDir()},
-		TemplateStore: store.TemplateStore{Dir: config.TemplatesDir()},
-		AliasStore:    store.JSONMapStore{Path: config.AliasesFilePath()},
-		CacheStore:    store.CacheStore{Dir: config.CacheDir()},
+		LoadConfig:       config.Load,
+		ResolveAPIKey:    defaultResolveAPIKey,
+		BuildProvider:    provider.Build,
+		BuildCLIProvider: provider.BuildCLI,
+		ChatStore:        store.ChatStore{Dir: config.ChatCacheDir()},
+		FragmentStore:    store.FragmentStore{Dir: config.FragmentsDir()},
+		RoleStore:        store.RoleStore{Dir: config.RolesDir()},
+		TemplateStore:    store.TemplateStore{Dir: config.TemplatesDir()},
+		AliasStore:       store.JSONMapStore{Path: config.AliasesFilePath()},
+		CacheStore:       store.CacheStore{Dir: config.CacheDir()},
 		NewLogStore: func() Logs {
 			return logStore
 		},

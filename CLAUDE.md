@@ -25,6 +25,7 @@ Implemented features include:
 - Roles, templates, fragments, aliases, keys, and logs subcommands
 - Structured JSON output with `--schema`
 - Providers: OpenAI, Anthropic, Gemini, Ollama
+- Configurable provider transport for Anthropic, OpenAI, and Gemini: API or local CLI
 - Request caching
 - SQLite logging and log search
 - Shell safety modes: `host`, `safe`, and `sandbox`
@@ -53,6 +54,8 @@ Provider API keys are typically supplied via environment variables such as:
 - `GEMINI_API_KEY`
 
 Provider-specific base URL overrides are supported through config and `KNOTICAL_*` env vars.
+Anthropic, OpenAI, and Gemini can also be configured to use local CLI transports instead of API
+transports.
 
 ## Architecture
 
@@ -87,6 +90,9 @@ Sandbox execution defaults to:
 - read-only container filesystem
 - read-only mounted workspace
 - no network unless explicitly enabled
+
+These defaults can be overridden in `config.toml` with shell-specific settings such as runtime,
+image, execute mode, network, and write access.
 
 Interactive shell execution may regenerate commands for sandbox execution so the generated command
 matches the Linux `sh` container environment.

@@ -75,10 +75,32 @@ type LogEntry struct {
 	SystemPrompt  *string   `json:"system_prompt,omitempty"`
 	SchemaJSON    *string   `json:"schema_json,omitempty"`
 	FragmentsJSON *string   `json:"fragments_json,omitempty"`
+	ReductionJSON *string   `json:"reduction_json,omitempty"`
 	Prompt        string    `json:"prompt"`
 	Response      string    `json:"response"`
 	InputTokens   *int64    `json:"input_tokens,omitempty"`
 	OutputTokens  *int64    `json:"output_tokens,omitempty"`
 	DurationMS    *int64    `json:"duration_ms,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+type ReductionMetadata struct {
+	Profile           string   `json:"profile,omitempty"`
+	Transforms        []string `json:"transforms,omitempty"`
+	Shorthands        []string `json:"shorthands,omitempty"`
+	StdinLabel        string   `json:"stdin_label,omitempty"`
+	Mode              string   `json:"mode,omitempty"`
+	OriginalBytes     int      `json:"original_bytes,omitempty"`
+	OriginalLines     int      `json:"original_lines,omitempty"`
+	OriginalTokens    int      `json:"original_tokens,omitempty"`
+	FinalBytes        int      `json:"final_bytes,omitempty"`
+	FinalLines        int      `json:"final_lines,omitempty"`
+	FinalTokens       int      `json:"final_tokens,omitempty"`
+	DroppedLines      int      `json:"dropped_lines,omitempty"`
+	UniqueGroups      int      `json:"unique_groups,omitempty"`
+	PipelineApplied   bool     `json:"pipeline_applied,omitempty"`
+	Steps             []string `json:"steps,omitempty"`
+	Summarized        bool     `json:"summarized,omitempty"`
+	SummaryChunks     int      `json:"summary_chunks,omitempty"`
+	IntermediateModel string   `json:"intermediate_model,omitempty"`
 }

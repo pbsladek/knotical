@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pbsladek/knotical/internal/config"
+	"github.com/pbsladek/knotical/internal/ingest"
 	"github.com/pbsladek/knotical/internal/model"
 	"github.com/pbsladek/knotical/internal/provider"
 	"github.com/pbsladek/knotical/internal/shell"
@@ -63,6 +64,9 @@ func (s *Service) appendFragments(prompt string, names []string) (string, error)
 }
 
 func (s *Service) resolveAlias(modelID string) string {
+	if s.deps.AliasStore == nil {
+		return modelID
+	}
 	aliases, err := s.deps.AliasStore.Load()
 	if err != nil {
 		return modelID
@@ -82,6 +86,7 @@ func (s *Service) resolveModelAndSystem(req Request, cfg config.Config) (string,
 }
 
 type requestState struct {
+	providerName   string
 	modelID        string
 	systemPrompt   string
 	temperature    float64
@@ -89,8 +94,10 @@ type requestState struct {
 }
 
 func (s *Service) resolveRequestState(req Request, cfg config.Config) (requestState, error) {
+	providerCfg := cfg.ProviderSettings()
 	state := requestState{
-		modelID:        cfg.DefaultModel,
+		providerName:   providerCfg.DefaultProvider,
+		modelID:        providerCfg.DefaultModel,
 		systemPrompt:   req.System,
 		temperature:    cfg.Temperature,
 		renderMarkdown: cfg.PrettifyMarkdown,
@@ -108,12 +115,18 @@ func (s *Service) resolveRequestState(req Request, cfg config.Config) (requestSt
 		}
 		applyTemplateState(&state, req, template)
 	}
-	if err := s.applyModeState(&state, req); err != nil {
+	if err := s.applyModeState(&state, req, cfg); err != nil {
 		return requestState{}, err
 	}
 	if req.NoMD || req.Extract {
 		state.renderMarkdown = false
 	}
+	resolvedProvider, resolvedModel, err := provider.ResolveModel(s.resolveAlias(state.modelID), req.Provider, providerCfg.DefaultProvider)
+	if err != nil {
+		return requestState{}, err
+	}
+	state.providerName = resolvedProvider
+	state.modelID = resolvedModel
 	return state, nil
 }
 
@@ -129,7 +142,8 @@ func applyTemplateState(state *requestState, req Request, template store.Templat
 	}
 }
 
-func (s *Service) applyModeState(state *requestState, req Request) error {
+func (s *Service) applyModeState(state *requestState, req Request, cfg config.Config) error {
+	logCfg := cfg.LogAnalysisSettings()
 	switch {
 	case req.System != "":
 		state.systemPrompt = req.System
@@ -147,6 +161,9 @@ func (s *Service) applyModeState(state *requestState, req Request) error {
 			state.systemPrompt = shell.ShellSystemPrompt()
 		}
 		state.renderMarkdown = false
+	case req.AnalyzeLogs:
+		state.systemPrompt = logAnalysisSystemPrompt(logCfg)
+		state.renderMarkdown = logCfg.Markdown
 	case req.Code:
 		state.systemPrompt = "Provide only code as output without any explanation or markdown formatting. Do not add backticks or language tags around the code."
 		state.renderMarkdown = false
@@ -155,6 +172,13 @@ func (s *Service) applyModeState(state *requestState, req Request) error {
 		state.renderMarkdown = false
 	}
 	return nil
+}
+
+func logAnalysisSystemPrompt(cfg config.LogAnalysisSettings) string {
+	if strings.TrimSpace(cfg.SystemPrompt) != "" {
+		return strings.TrimSpace(cfg.SystemPrompt)
+	}
+	return "You are analyzing operational logs. Be concise and technical. Identify the most likely root cause, cite the strongest evidence from the logs, and suggest the next diagnostic or remediation steps. If the logs are inconclusive, say what is missing."
 }
 
 func (s *Service) executePrompt(ctx context.Context, prov provider.Provider, req provider.Request) (model.CompletionResponse, error) {
@@ -178,10 +202,140 @@ func (s *Service) executePrompt(ctx context.Context, prov provider.Provider, req
 }
 
 func defaultResolveAPIKey(providerName string) (string, error) {
-	if providerName == "ollama" {
+	if providerName == "ollama" || strings.HasSuffix(providerName, "-cli") {
 		return "", nil
 	}
 	return store.NewKeyManager(config.KeysFilePath()).Require(providerName)
+}
+
+func applyShellDefaults(req Request, cfg config.Config) Request {
+	if req.Shell {
+		req = applyShellExecutionDefaults(req, cfg.ShellSettings())
+	}
+	return applyInputDefaults(req, cfg)
+}
+
+func applyShellExecutionDefaults(req Request, shellCfg config.ShellSettings) Request {
+	req.ExecuteMode = defaultExecutionMode(req.ExecuteMode, shellCfg.ExecuteMode)
+	req.SandboxRuntime = defaultString(req.SandboxRuntime, shellCfg.Runtime)
+	req.SandboxImage = defaultString(req.SandboxImage, shellCfg.Image)
+	req.SandboxNetwork = defaultBool(req.SandboxNetwork, shellCfg.Network)
+	req.SandboxWrite = defaultBool(req.SandboxWrite, shellCfg.Write)
+	return req
+}
+
+func applyInputDefaults(req Request, cfg config.Config) Request {
+	req = applyIngestDefaults(req, cfg.IngestSettings())
+	req = applySummarizeDefaults(req, cfg.SummarizeSettings())
+	return applyAnalyzeLogDefaults(req, cfg.LogAnalysisSettings())
+}
+
+func applyIngestDefaults(req Request, ingestCfg config.IngestSettings) Request {
+	req.MaxInputBytes = defaultInt(req.MaxInputBytes, ingestCfg.MaxInputBytes)
+	req.MaxInputLines = defaultInt(req.MaxInputLines, ingestCfg.MaxInputLines)
+	req.MaxInputTokens = defaultInt(req.MaxInputTokens, ingestCfg.MaxInputTokens)
+	req.InputReduction = defaultString(req.InputReduction, ingestCfg.InputReductionMode)
+	req.HeadLines = defaultInt(req.HeadLines, ingestCfg.DefaultHeadLines)
+	req.TailLines = defaultInt(req.TailLines, ingestCfg.DefaultTailLines)
+	req.SampleLines = defaultInt(req.SampleLines, ingestCfg.DefaultSampleLines)
+	return req
+}
+
+func applySummarizeDefaults(req Request, summarizeCfg config.SummarizeSettings) Request {
+	if req.SummarizeChunkTokens == 0 && summarizeCfg.ChunkTokens > 0 {
+		req.SummarizeChunkTokens = summarizeCfg.ChunkTokens
+	}
+	if req.SummarizeIntermediateModel == "" && strings.TrimSpace(summarizeCfg.IntermediateModel) != "" {
+		req.SummarizeIntermediateModel = strings.TrimSpace(summarizeCfg.IntermediateModel)
+	}
+	return req
+}
+
+func applyAnalyzeLogDefaults(req Request, logCfg config.LogAnalysisSettings) Request {
+	if !req.AnalyzeLogs {
+		return req
+	}
+	if req.Profile == "" && strings.TrimSpace(logCfg.DefaultProfile) != "" {
+		req.Profile = strings.TrimSpace(logCfg.DefaultProfile)
+	}
+	if req.Schema == "" && strings.TrimSpace(logCfg.Schema) != "" {
+		req.Schema = strings.TrimSpace(logCfg.Schema)
+	}
+	if req.StdinLabel == "" || req.StdinLabel == "input" {
+		req.StdinLabel = "logs"
+	}
+	return req
+}
+
+func defaultInt(current int, fallback int) int {
+	if current == 0 && fallback > 0 {
+		return fallback
+	}
+	return current
+}
+
+func defaultString(current string, fallback string) string {
+	if current == "" && fallback != "" {
+		return fallback
+	}
+	return current
+}
+
+func defaultBool(current bool, fallback bool) bool {
+	if !current && fallback {
+		return true
+	}
+	return current
+}
+
+func defaultExecutionMode(current shell.ExecutionMode, fallback string) shell.ExecutionMode {
+	if current == "" && fallback != "" {
+		return shell.ExecutionMode(fallback)
+	}
+	return current
+}
+
+func requestPipelineOptions(req Request) ingest.PipelineOptions {
+	pipeline := req.PipelineInput
+	shorthands := make([]string, 0, 4)
+	if pipeline.Clean {
+		shorthands = append(shorthands, "clean")
+	}
+	if pipeline.Dedupe {
+		shorthands = append(shorthands, "dedupe")
+	}
+	if pipeline.Unique {
+		shorthands = append(shorthands, "unique")
+	}
+	if pipeline.K8s {
+		shorthands = append(shorthands, "k8s")
+	}
+	return ingest.PipelineOptions{
+		Profile:    pipeline.Profile,
+		Shorthands: shorthands,
+		Transforms: append([]string(nil), pipeline.Transforms...),
+		NoPipeline: pipeline.NoPipeline,
+	}
+}
+
+func (s *Service) buildConfiguredProvider(cfg config.Config, runtime config.ProviderRuntime) (provider.Provider, string, error) {
+	if runtime.Transport == "cli" {
+		prov, err := s.deps.BuildCLIProvider(runtime.Name, provider.CLIConfig(runtime.CLI))
+		if err != nil {
+			return nil, "", err
+		}
+		return prov, runtime.Name, nil
+	}
+	providerCfg := cfg.ProviderSettings()
+	apiKey, err := s.deps.ResolveAPIKey(runtime.Name)
+	if err != nil {
+		return nil, "", err
+	}
+	prov, err := s.deps.BuildProvider(runtime.Name, apiKey, runtime.BaseURL, providerCfg.RequestTimeout)
+	if err != nil {
+		return nil, "", err
+	}
+	return prov, runtime.Name, nil
 }
 
 func persistSessionSystemPrompt(session *model.ChatSession, systemPrompt string) {
@@ -198,8 +352,8 @@ func persistSessionSystemPrompt(session *model.ChatSession, systemPrompt string)
 	session.PushSystem(systemPrompt)
 }
 
-func applySchemaFallbackInstruction(systemPrompt string, schemaValue map[string]any, providerName string) string {
-	if schemaValue == nil || providerName == "openai" || providerName == "gemini" {
+func applySchemaFallbackInstruction(systemPrompt string, schemaValue map[string]any, caps config.ProviderCapabilities) string {
+	if schemaValue == nil || caps.NativeSchema {
 		return systemPrompt
 	}
 	schemaJSON, _ := json.Marshal(schemaValue)

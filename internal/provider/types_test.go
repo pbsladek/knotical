@@ -38,3 +38,59 @@ func TestValidateBaseURLRejectsCredentialsAndInvalidSchemes(t *testing.T) {
 		t.Fatal("expected malformed URL to fail")
 	}
 }
+
+func TestCapabilitiesForTransport(t *testing.T) {
+	apiCaps := CapabilitiesForTransport("openai", "api")
+	if !apiCaps.NativeStreaming || !apiCaps.NativeConversation || !apiCaps.NativeSchema || !apiCaps.ModelListing {
+		t.Fatalf("unexpected api capabilities: %+v", apiCaps)
+	}
+	cliCaps := CapabilitiesForTransport("openai", "cli")
+	if cliCaps.NativeStreaming || cliCaps.NativeConversation || cliCaps.NativeSchema || cliCaps.ModelListing {
+		t.Fatalf("unexpected cli capabilities: %+v", cliCaps)
+	}
+}
+
+func TestResolveModelUsesExplicitProvider(t *testing.T) {
+	providerName, modelID, err := ResolveModel("custom-model", "gemini", "openai")
+	if err != nil {
+		t.Fatalf("ResolveModel failed: %v", err)
+	}
+	if providerName != "gemini" || modelID != "custom-model" {
+		t.Fatalf("unexpected resolution: provider=%q model=%q", providerName, modelID)
+	}
+}
+
+func TestResolveModelSupportsProviderPrefixedModels(t *testing.T) {
+	providerName, modelID, err := ResolveModel("anthropic/claude-sonnet-4-5", "", "openai")
+	if err != nil {
+		t.Fatalf("ResolveModel failed: %v", err)
+	}
+	if providerName != "anthropic" || modelID != "claude-sonnet-4-5" {
+		t.Fatalf("unexpected resolution: provider=%q model=%q", providerName, modelID)
+	}
+}
+
+func TestResolveModelRejectsConflictingExplicitProvider(t *testing.T) {
+	_, _, err := ResolveModel("openai/gpt-4o-mini", "gemini", "openai")
+	if err == nil {
+		t.Fatal("expected conflicting provider error")
+	}
+}
+
+func TestResolveModelFallsBackToHeuristicAndDefault(t *testing.T) {
+	providerName, modelID, err := ResolveModel("claude-sonnet-4-5", "", "openai")
+	if err != nil {
+		t.Fatalf("ResolveModel failed: %v", err)
+	}
+	if providerName != "anthropic" || modelID != "claude-sonnet-4-5" {
+		t.Fatalf("unexpected heuristic resolution: provider=%q model=%q", providerName, modelID)
+	}
+
+	providerName, modelID, err = ResolveModel("my-custom-model", "", "gemini")
+	if err != nil {
+		t.Fatalf("ResolveModel failed: %v", err)
+	}
+	if providerName != "gemini" || modelID != "my-custom-model" {
+		t.Fatalf("unexpected default resolution: provider=%q model=%q", providerName, modelID)
+	}
+}

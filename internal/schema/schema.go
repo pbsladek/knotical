@@ -1,13 +1,17 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/xeipuuv/gojsonschema"
 )
 
 func Load(spec string) (map[string]any, error) {
+	var schema map[string]any
 	if spec == "" {
 		return nil, nil
 	}
@@ -16,13 +20,20 @@ func Load(spec string) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		var schema map[string]any
 		if err := json.Unmarshal(payload, &schema); err != nil {
 			return nil, err
 		}
-		return schema, nil
+	} else {
+		var err error
+		schema, err = DSLToJSONSchema(spec)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return DSLToJSONSchema(spec)
+	if err := validateSchemaDocument(schema); err != nil {
+		return nil, err
+	}
+	return schema, nil
 }
 
 func DSLToJSONSchema(dsl string) (map[string]any, error) {
@@ -60,57 +71,10 @@ func DSLToJSONSchema(dsl string) (map[string]any, error) {
 }
 
 func Validate(schema map[string]any, value any) error {
-	typ, _ := schema["type"].(string)
-	if typ == "" {
-		typ = "object"
+	if err := validateSchemaDocument(schema); err != nil {
+		return err
 	}
-	if err := validateType(typ, value); err != nil {
-		return fmt.Errorf("top-level schema mismatch: %w", err)
-	}
-	if typ != "object" {
-		return nil
-	}
-	object, ok := value.(map[string]any)
-	if !ok {
-		return fmt.Errorf("JSON value must be an object")
-	}
-	properties, ok := schema["properties"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("schema is missing properties")
-	}
-	if required, ok := schema["required"].([]any); ok {
-		for _, item := range required {
-			name, _ := item.(string)
-			if _, exists := object[name]; !exists {
-				return fmt.Errorf("missing required field %q", name)
-			}
-		}
-	}
-	if required, ok := schema["required"].([]string); ok {
-		for _, name := range required {
-			if _, exists := object[name]; !exists {
-				return fmt.Errorf("missing required field %q", name)
-			}
-		}
-	}
-	for name, rawFieldSchema := range properties {
-		fieldSchema, ok := rawFieldSchema.(map[string]any)
-		if !ok {
-			continue
-		}
-		value, exists := object[name]
-		if !exists {
-			continue
-		}
-		fieldType, _ := fieldSchema["type"].(string)
-		if fieldType == "" {
-			fieldType = "string"
-		}
-		if err := validateType(fieldType, value); err != nil {
-			return fmt.Errorf("field %q does not match type %q", name, fieldType)
-		}
-	}
-	return nil
+	return validateValue(schema, value)
 }
 
 func PrettyValidateResponse(schema map[string]any, response string) (string, error) {
@@ -126,6 +90,38 @@ func PrettyValidateResponse(schema map[string]any, response string) (string, err
 		return "", err
 	}
 	return string(payload), nil
+}
+
+func validateSchemaDocument(schema map[string]any) error {
+	if len(schema) == 0 {
+		return fmt.Errorf("schema cannot be empty")
+	}
+	loader := gojsonschema.NewGoLoader(schema)
+	if _, err := gojsonschema.NewSchema(loader); err != nil {
+		return fmt.Errorf("invalid JSON schema: %w", err)
+	}
+	return nil
+}
+
+func validateValue(schema map[string]any, value any) error {
+	result, err := gojsonschema.Validate(
+		gojsonschema.NewGoLoader(schema),
+		gojsonschema.NewGoLoader(value),
+	)
+	if err != nil {
+		return fmt.Errorf("schema validation failed: %w", err)
+	}
+	if result.Valid() {
+		return nil
+	}
+	var details bytes.Buffer
+	for idx, schemaErr := range result.Errors() {
+		if idx > 0 {
+			details.WriteString("; ")
+		}
+		details.WriteString(schemaErr.String())
+	}
+	return fmt.Errorf("response did not match schema: %s", details.String())
 }
 
 func normalizeType(typ string) (string, error) {
@@ -145,42 +141,4 @@ func normalizeType(typ string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported schema type %q", typ)
 	}
-}
-
-func validateType(expected string, value any) error {
-	switch expected {
-	case "string":
-		if _, ok := value.(string); ok {
-			return nil
-		}
-	case "integer":
-		switch v := value.(type) {
-		case float64:
-			if v == float64(int64(v)) {
-				return nil
-			}
-		case int, int64:
-			return nil
-		}
-	case "number":
-		switch value.(type) {
-		case float64, int, int64:
-			return nil
-		}
-	case "boolean":
-		if _, ok := value.(bool); ok {
-			return nil
-		}
-	case "array":
-		if _, ok := value.([]any); ok {
-			return nil
-		}
-	case "object":
-		if _, ok := value.(map[string]any); ok {
-			return nil
-		}
-	default:
-		return fmt.Errorf("unsupported schema type %q", expected)
-	}
-	return fmt.Errorf("expected %s", expected)
 }

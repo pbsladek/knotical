@@ -5,13 +5,17 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/pbsladek/knotical/internal/output"
 	"github.com/pbsladek/knotical/internal/provider"
 )
 
 func (s *Service) RunRepl(ctx context.Context, req Request) error {
+	cfg, err := s.deps.LoadConfig()
+	if err != nil {
+		return err
+	}
+	req = applyShellDefaults(req, cfg)
 	runCtx, err := s.prepareReplRun(req)
 	if err != nil {
 		return err
@@ -42,17 +46,13 @@ func (s *Service) prepareReplRun(req Request) (replRunContext, error) {
 	if err != nil {
 		return replRunContext{}, err
 	}
-	modelID, systemPrompt, temperature, renderMarkdown, err := s.resolveModelAndSystem(req, cfg)
+	req = applyShellDefaults(req, cfg)
+	state, err := s.resolveRequestState(req, cfg)
 	if err != nil {
 		return replRunContext{}, err
 	}
-	modelID = s.resolveAlias(modelID)
-	providerName := provider.DetectProvider(modelID, cfg.DefaultProvider)
-	apiKey, err := s.deps.ResolveAPIKey(providerName)
-	if err != nil {
-		return replRunContext{}, err
-	}
-	prov, err := s.deps.BuildProvider(providerName, apiKey, cfg.BaseURLForProvider(providerName), time.Duration(cfg.RequestTimeout)*time.Second)
+	runtimeCfg := cfg.ProviderRuntime(state.providerName)
+	prov, resolvedProviderName, err := s.buildConfiguredProvider(cfg, runtimeCfg)
 	if err != nil {
 		return replRunContext{}, err
 	}
@@ -60,15 +60,16 @@ func (s *Service) prepareReplRun(req Request) (replRunContext, error) {
 	if err != nil {
 		return replRunContext{}, err
 	}
-	persistSessionSystemPrompt(&session, systemPrompt)
-	systemPrompt = effectiveSessionSystemPrompt(session, systemPrompt)
-	tempPtr, topPPtr := samplingPointers(temperature, req.TopP)
+	persistSessionSystemPrompt(&session, state.systemPrompt)
+	state.systemPrompt = effectiveSessionSystemPrompt(session, state.systemPrompt)
+	tempPtr, topPPtr := samplingPointers(state.temperature, req.TopP)
 	return replRunContext{
 		cfg:            cfg,
-		modelID:        modelID,
-		systemPrompt:   systemPrompt,
-		renderMarkdown: renderMarkdown,
-		providerName:   providerName,
+		modelID:        state.modelID,
+		systemPrompt:   state.systemPrompt,
+		renderMarkdown: state.renderMarkdown,
+		providerName:   resolvedProviderName,
+		providerCaps:   runtimeCfg.Capabilities,
 		prov:           prov,
 		session:        session,
 		tempPtr:        tempPtr,
