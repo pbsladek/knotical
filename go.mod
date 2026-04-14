@@ -4,13 +4,13 @@ go 1.26.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/anthropics/anthropic-sdk-go v1.30.0
-	github.com/mattn/go-sqlite3 v1.14.40
+	github.com/anthropics/anthropic-sdk-go v1.35.0
+	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/openai/openai-go v1.12.0
 	github.com/spf13/cobra v1.10.2
 	github.com/xeipuuv/gojsonschema v1.2.0
-	golang.org/x/term v0.41.0
-	google.golang.org/genai v1.52.1
+	golang.org/x/term v0.42.0
+	google.golang.org/genai v1.53.0
 )
 
 require (
@@ -42,7 +42,7 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/api v0.274.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
