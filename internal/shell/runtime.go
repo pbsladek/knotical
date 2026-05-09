@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 func ExecuteCommand(req ExecutionRequest) error {
@@ -95,7 +96,11 @@ func executeSafe(command string) error {
 	if err != nil {
 		return err
 	}
+	args = safeExecutionArgs(name, args)
 	cmd := exec.Command(name, args...)
+	if name == "git" {
+		cmd.Env = safeGitEnv(os.Environ())
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -122,4 +127,40 @@ func shellCommand(command string) (string, []string) {
 		return shell, []string{"-c", command}
 	}
 	return "sh", []string{"-c", command}
+}
+
+func safeExecutionArgs(name string, args []string) []string {
+	if name != "git" {
+		return args
+	}
+	safeArgs := []string{
+		"--no-pager",
+		"-c", "core.pager=cat",
+		"-c", "diff.external=",
+		"-c", "interactive.diffFilter=",
+	}
+	safeArgs = append(safeArgs, args...)
+	return safeArgs
+}
+
+func safeGitEnv(environ []string) []string {
+	filtered := make([]string, 0, len(environ)+5)
+	for _, item := range environ {
+		if strings.HasPrefix(item, "GIT_EXTERNAL_DIFF=") ||
+			strings.HasPrefix(item, "GIT_DIFF_OPTS=") ||
+			strings.HasPrefix(item, "GIT_PAGER=") ||
+			strings.HasPrefix(item, "PAGER=") ||
+			strings.HasPrefix(item, "GIT_OPTIONAL_LOCKS=") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	filtered = append(filtered,
+		"GIT_EXTERNAL_DIFF=",
+		"GIT_DIFF_OPTS=",
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+		"GIT_OPTIONAL_LOCKS=0",
+	)
+	return filtered
 }

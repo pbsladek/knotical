@@ -81,7 +81,8 @@ Shell mode generates commands but does not execute them unless explicitly reques
 Supported execution modes:
 
 - `host`: run on the local machine
-- `safe`: run only a constrained allowlist of read-only commands without shell parsing
+- `safe`: run only a constrained allowlist of read-only commands without shell parsing; `git` is
+  limited to read-only subcommands and options
 - `sandbox`: run in Docker or Podman inside a Linux container
 
 Sandbox execution defaults to:

@@ -502,6 +502,7 @@ Safe mode characteristics:
 
 - no shell parsing
 - only a constrained allowlist of read-only commands
+- `git` is limited to read-only subcommands and options
 - rejects high-risk commands
 
 ### Sandbox execution

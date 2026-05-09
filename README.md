@@ -253,6 +253,9 @@ Execute in constrained safe mode:
 knotical --shell --safe "list tracked files"
 ```
 
+Safe mode runs direct commands without shell parsing. It only allows a small read-only command
+allowlist, and `git` commands are limited to read-only subcommands and options.
+
 Execute in a Docker or Podman sandbox:
 
 ```bash
