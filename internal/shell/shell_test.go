@@ -193,9 +193,113 @@ func TestParseSimpleCommandAllowsReadOnlyGitSubcommands(t *testing.T) {
 	}
 }
 
+func TestParseSimpleCommandRejectsUnsafeGitBranchArgs(t *testing.T) {
+	for _, command := range []string{
+		"git branch feature",
+		"git branch -D main",
+		"git branch --move old new",
+	} {
+		if _, _, err := ParseSimpleCommand(command); err == nil {
+			t.Fatalf("expected unsafe git branch command to fail: %s", command)
+		}
+	}
+}
+
+func TestParseSimpleCommandAllowsSafeGitBranchListingArgs(t *testing.T) {
+	if _, _, err := ParseSimpleCommand("git branch --all --verbose --sort=-committerdate"); err != nil {
+		t.Fatalf("expected git branch listing command to pass: %v", err)
+	}
+}
+
+func TestParseSimpleCommandRejectsUnsafeGitRemoteArgs(t *testing.T) {
+	for _, command := range []string{
+		"git remote add origin https://example.invalid/repo.git",
+		"git remote remove origin",
+		"git remote set-url origin https://example.invalid/repo.git",
+		"git remote show origin",
+	} {
+		if _, _, err := ParseSimpleCommand(command); err == nil {
+			t.Fatalf("expected unsafe git remote command to fail: %s", command)
+		}
+	}
+}
+
+func TestParseSimpleCommandAllowsSafeGitRemoteArgs(t *testing.T) {
+	for _, command := range []string{
+		"git remote",
+		"git remote -v",
+		"git remote get-url origin",
+		"git remote get-url --push origin",
+	} {
+		if _, _, err := ParseSimpleCommand(command); err != nil {
+			t.Fatalf("expected safe git remote command to pass: %s: %v", command, err)
+		}
+	}
+}
+
+func TestParseSimpleCommandRejectsGitWriteAndExternalExecutionOptions(t *testing.T) {
+	for _, command := range []string{
+		"git diff --output=patch.diff",
+		"git show --output patch.diff HEAD",
+		"git diff --ext-diff",
+		"git show --textconv HEAD:file.bin",
+		"git grep -O less pattern",
+		"git log --help",
+	} {
+		if _, _, err := ParseSimpleCommand(command); err == nil {
+			t.Fatalf("expected unsafe git option to fail: %s", command)
+		}
+	}
+}
+
 func TestParseSimpleCommandRejectsMutableGitSubcommands(t *testing.T) {
 	if _, _, err := ParseSimpleCommand("git checkout main"); err == nil {
 		t.Fatal("expected mutable git subcommand to fail")
+	}
+}
+
+func TestSafeExecutionArgsHardensGit(t *testing.T) {
+	args := safeExecutionArgs("git", []string{"diff"})
+	got := strings.Join(args, " ")
+	for _, want := range []string{"--no-pager", "core.pager=cat", "diff.external=", "interactive.diffFilter=", "diff"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected safe git args to contain %q, got %q", want, got)
+		}
+	}
+}
+
+func TestSafeGitEnvOverridesRiskyGitEnvironment(t *testing.T) {
+	env := safeGitEnv([]string{
+		"PATH=/bin",
+		"GIT_EXTERNAL_DIFF=/tmp/diff",
+		"GIT_DIFF_OPTS=--ext-diff",
+		"GIT_PAGER=less",
+		"PAGER=less",
+		"GIT_OPTIONAL_LOCKS=1",
+	})
+	got := strings.Join(env, "\n")
+	for _, blocked := range []string{
+		"GIT_EXTERNAL_DIFF=/tmp/diff",
+		"GIT_DIFF_OPTS=--ext-diff",
+		"GIT_PAGER=less",
+		"PAGER=less",
+		"GIT_OPTIONAL_LOCKS=1",
+	} {
+		if strings.Contains(got, blocked) {
+			t.Fatalf("expected safe git env to remove %q, got %q", blocked, got)
+		}
+	}
+	for _, want := range []string{
+		"PATH=/bin",
+		"GIT_EXTERNAL_DIFF=",
+		"GIT_DIFF_OPTS=",
+		"GIT_PAGER=cat",
+		"PAGER=cat",
+		"GIT_OPTIONAL_LOCKS=0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected safe git env to contain %q, got %q", want, got)
+		}
 	}
 }
 
